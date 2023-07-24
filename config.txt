@@ -1,0 +1,5 @@
+APPLICATION_NAME=Rem's Studio
+DOWNLOAD_URL=https://remsstudio.phychi.com/version.php?isWindows=1&redirect=1
+VERSION_URL=https://remsstudio.phychi.com/version.php?isWindows=1
+FILE_TO_RUN=RemsStudio.exe
+ENABLE_UNZIP=false
