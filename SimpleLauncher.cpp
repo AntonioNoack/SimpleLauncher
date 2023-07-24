@@ -4,7 +4,6 @@
 #include "framework.h"
 #include "SimpleLauncher.h"
 
-
 #include "stb_image.h"
 
 #include <iostream>
@@ -17,11 +16,12 @@ HINSTANCE hInst;// current instance
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
-INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
 
 HICON LoadIconFromFile(std::wstring str) {
 	return (HICON)LoadImageW(NULL, str.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE);
 }
+
+#define LAUNCH_BUTTON_ID 0x101
 
 int main()
 {
@@ -103,18 +103,22 @@ std::string versionURL("");
 std::string fileToRun("");
 std::string titleImage("title.jpg");
 bool doUnzip = true;
+uint32_t textColor = 0xffffff; // bgr
+int waitingMillis = 1500;
+bool forceUpdate = false;
 
 std::wstring status(L"");
 
 
 int progressBarHeight = 30;
+int buttonHeight = 30;
 
 HWND hWnd = nullptr;
 HWND hProgressBar = nullptr;
+HWND hLaunchButton = nullptr;
 HBITMAP hImage = nullptr;
 int hImageW = 0, hImageH = 0;
 uint32_t* rawImagePixels;
-std::thread* downloadThread = nullptr;
 
 
 // Function to create a bitmap from ARGB data
@@ -170,6 +174,10 @@ std::wstring StrToWStr(std::string src) {
 	return converter.from_bytes(src);
 }
 
+bool parseBool(std::string value) {
+	return value == "1" || value == "true" || value == "True" || value == "TRUE";
+}
+
 void LoadConfig() {
 	std::ifstream file("config.txt");
 	if (file.is_open()) {
@@ -195,7 +203,16 @@ void LoadConfig() {
 					titleImage = value;
 				}
 				else if (key == "ENABLE_UNZIP") {
-					doUnzip = value == "1" || value == "true" || value == "True" || value == "TRUE";
+					doUnzip = parseBool(value);
+				}
+				else if (key == "WAITING_MILLIS") {
+					waitingMillis = std::stoi(value);
+				}
+				else if (key == "TEXT_COLOR") {
+					textColor = std::stoi(value, nullptr, 16);
+				}
+				else if (key == "FORCE_UPDATE") {
+					forceUpdate = parseBool(value);
 				}
 			}
 		}
@@ -304,7 +321,10 @@ void SetStatus(std::wstring newStatus) {
 	InvalidateRect(hWnd, NULL, TRUE);
 }
 
-void LaunchGame() {
+void LaunchGame(bool wait) {
+
+	// wait a little to not be completely instant lol, can be removed ofc without any downsides
+	if(wait) std::this_thread::sleep_for(std::chrono::duration<int, std::milli>(waitingMillis));
 
 	SendMessage(hProgressBar, PBM_SETPOS, 65535, 0);
 
@@ -373,7 +393,7 @@ bool DeleteFolderRecursively(const std::wstring& folderPath) {
 #include <direct.h>
 #include <filesystem>
 
-void DownloadVersion() {
+void UpdateAndStart() {
 	(void) _mkdir("Data");
 	std::string oldVersion = LoadVersion("Data/version.txt");
 	std::remove("Data/version.tmp");
@@ -466,19 +486,21 @@ void DownloadVersion() {
 				(void)std::rename("Data/version.tmp", "Data/version.txt");
 
 				// then start game
-				LaunchGame();
+				LaunchGame(true);
 			
 			} else {
 				SetStatus(L"Game Download Failed");
+				if(!forceUpdate) LaunchGame(true);
 			}
 		}
 		else {
 			SetStatus(L"Launching game");
-			LaunchGame();
+			LaunchGame(true);
 		}
 	}
 	else {
 		SetStatus(L"Failed to query version");
+		if (!forceUpdate) LaunchGame(true);
 	}
 }
 
@@ -506,16 +528,32 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 		NULL                                // Pointer not needed.
 	);
 
+	hLaunchButton = CreateWindowEx(
+		0,                           // Optional window styles.
+		L"BUTTON",                   // Button control class.
+		L"Launch Game",              // Text for the button.
+		WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, // Visible and child window styles for a push button.
+		0, 600 - buttonHeight,       // Position of the button (left-top coordinates).
+		800, buttonHeight,           // Width and height of the button.
+		hWnd,                        // Parent window.
+		NULL,                        // No menu.
+		GetModuleHandle(NULL),       // Instance of the module.
+		NULL                         // Pointer not needed.
+	);
+	SetWindowLongPtr(hLaunchButton, GWLP_ID, LAUNCH_BUTTON_ID);
+
 	if (versionURL.empty()) {
-		status = L"Missing version URL";
+		SetStatus(L"Missing version URL");
 	}
 	else if (downloadURL.empty()) {
-		status = L"Missing download URL";
+		SetStatus(L"Missing download URL");
+	}
+	else if (fileToRun.empty()) {
+		SetStatus(L"Missing name of file to run");
 	}
 	else {
-		// todo download version
-		status = L"Requesting version";
-		downloadThread = new std::thread(DownloadVersion);
+		SetStatus(L"Requesting version");
+		new std::thread(UpdateAndStart);
 	}
 
 	int w = 2, h = 2;
@@ -544,11 +582,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	case WM_COMMAND:
 	{
 		int wmId = LOWORD(wParam);
-		// Parse the menu selections:
+		int notificationCode = HIWORD(wParam);
 		switch (wmId)
 		{
-		case IDM_ABOUT:
-			DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
+		case LAUNCH_BUTTON_ID:
+			if (notificationCode == BN_CLICKED) {
+				LaunchGame(false);
+			}
 			break;
 		case IDM_EXIT:
 			DestroyWindow(hWnd);
@@ -562,10 +602,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	{
 		// Get the new client width after resizing
 		int newClientWidth = LOWORD(lParam);
+		int newClientHeight = HIWORD(lParam);
 		// Update the progress bar's width based on the new client width
 		SetWindowPos(hProgressBar, NULL, 0, 0, newClientWidth, progressBarHeight, SWP_NOZORDER);
+		SetWindowPos(hLaunchButton, NULL, 0, newClientHeight - buttonHeight, newClientWidth, buttonHeight, SWP_NOZORDER);
 		// Ensure the progress bar is repainted with its new size
 		InvalidateRect(hProgressBar, NULL, TRUE);
+		InvalidateRect(hLaunchButton, NULL, TRUE);
 		break;
 	}
 	case WM_PAINT:
@@ -583,18 +626,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		SendMessage(hProgressBar, PBM_SETPOS, 35000, 0);
 
 		if (hImage) {
-			/*
-			COLORREF fillColor = RGB(60, 60, 60);
-			HBRUSH hBrush = CreateSolidBrush(fillColor);
-			RECT rect = { 0, progressBarHeight, 256, 256 };
-			FillRect(hdc, &rect, hBrush);
-			// Release the brush
-			DeleteObject(hBrush);
-			*/
 
 			// scaling: crop
 			int displayWidth = m_clientWidth;
-			int displayHeight = m_clientHeight - progressBarHeight;
+			int displayHeight = m_clientHeight - progressBarHeight - buttonHeight;
 			int xPos = 0, yPos = progressBarHeight;
 
 			int dx = 0, dy = 0;
@@ -621,6 +656,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		textRect.right = m_clientWidth;
 		textRect.bottom = 60;
 		SetBkMode(hdc, TRANSPARENT);
+		SetTextColor(hdc, textColor);
 		DrawText(hdc, status.c_str(), -1, &textRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 		SetBkMode(hdc, OPAQUE);
 
@@ -634,24 +670,4 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		return DefWindowProc(hWnd, message, wParam, lParam);
 	}
 	return 0;
-}
-
-// Message handler for about box.
-INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
-{
-	UNREFERENCED_PARAMETER(lParam);
-	switch (message)
-	{
-	case WM_INITDIALOG:
-		return (INT_PTR)TRUE;
-
-	case WM_COMMAND:
-		if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
-		{
-			EndDialog(hDlg, LOWORD(wParam));
-			return (INT_PTR)TRUE;
-		}
-		break;
-	}
-	return (INT_PTR)FALSE;
 }
